@@ -1,0 +1,15 @@
+{
+  "name": "Somnia",
+  "version": "1.0.0",
+  "description": "Somnia 测试网自动交换和水龙头领取机器人",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5",
+    "chalk": "^5.3.0"
+  }
+}
