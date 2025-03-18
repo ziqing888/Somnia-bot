@@ -641,7 +641,7 @@ async function showSendTokenSubMenu() {
 // 启动
 async function start() {
   console.log(chalk.bold.green("=================== SOMNIA AUTO SWAP ==================="));
-  console.log(chalk.yellow("欢迎使用 Somnia 测试网自动化工具"));
+  console.log(chalk.yellow("关注X：https://x.com/qklxsqf 获得更多资讯："));
   console.log(chalk.green("======================================================="));
   await updateWalletData();
   await showMainMenu();
