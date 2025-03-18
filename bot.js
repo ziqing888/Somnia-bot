@@ -4,6 +4,8 @@ import { ethers } from "ethers";
 import fs from "fs";
 import readline from "readline";
 import chalk from "chalk";
+import axios from "axios";
+import { SocksProxyAgent } from "socks-proxy-agent";
 
 // 配置
 const RPC_URL = process.env.RPC_URL || "https://dream-rpc.somnia.network";
@@ -11,6 +13,7 @@ const PRIVATE_KEY = process.env.PRIVATE_KEY || "";
 const PING_TOKEN_ADDRESS = process.env.PING_TOKEN_ADDRESS || "0xbecd9b5f373877881d91cbdbaf013d97eb532154";
 const PONG_TOKEN_ADDRESS = process.env.PONG_TOKEN_ADDRESS || "0x7968ac15a72629e05f41b8271e4e7292e0cc9f90";
 const SWAP_CONTRACT_ADDRESS = process.env.SWAP_CONTRACT_ADDRESS || "0x6aac14f090a35eea150705f72d90e4cdc4a49b2c";
+const PROXY = process.env.PROXY || null; // 可选代理，例如 "socks5://127.0.0.1:9050"
 const NETWORK_NAME = process.env.NETWORK_NAME || "Somnia 测试网";
 
 const swapContractABI = [
@@ -107,7 +110,97 @@ function getTokenName(address) {
   return address;
 }
 
-// 领取水龙头
+// 领取 STT 水龙头（参考 somniaBot 修改版）
+async function claimFaucetSTT(currentNum = 1, total = 1) {
+  if (claimFaucetRunning) {
+    addLog(`[${currentNum}/${total}] STT 水龙头请求已在进行中。`);
+    return;
+  }
+  claimFaucetRunning = true;
+  try {
+    if (!globalWallet) throw new Error("钱包尚未初始化。");
+    const address = globalWallet.address;
+
+    // 配置 axios 请求
+    const axiosConfig = {
+      timeout: 60000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "origin": "https://testnet.somnia.network",
+        "referer": "https://testnet.somnia.network"
+      }
+    };
+
+    // 添加代理支持
+    if (PROXY) {
+      const agent = new SocksProxyAgent(PROXY);
+      axiosConfig.httpsAgent = agent;
+      axiosConfig.httpAgent = agent;
+      addLog(`[${currentNum}/${total}] 使用代理: ${PROXY}`);
+    }
+
+    addLog(`[${currentNum}/${total}] 正在为地址 ${getShortAddress(address)} 请求 STT 水龙头...`);
+    const payload = { address };
+    const response = await axios.post(
+      "https://testnet.somnia.network/api/faucet",
+      payload,
+      axiosConfig
+    );
+
+    // 处理响应
+    if (response.status === 200) {
+      addLog(`[${currentNum}/${total}] STT 水龙头领取成功！响应: ${JSON.stringify(response.data)}`);
+      addLog(`[${currentNum}/${total}] 等待网络确认...`);
+      await delay(10000); // 保持与原脚本一致的等待时间
+      await updateWalletData();
+      return response.data;
+    } else if (response.status === 429) {
+      addLog(`[${currentNum}/${total}] 请求过于频繁或已领取`);
+      return;
+    } else {
+      throw new Error(`意外的状态码: ${response.status}`);
+    }
+  } catch (error) {
+    if (error.response) {
+      addLog(`[${currentNum}/${total}] STT 水龙头领取失败: 状态码 ${error.response.status}，错误: ${JSON.stringify(error.response.data)}`);
+    } else {
+      addLog(`[${currentNum}/${total}] STT 水龙头领取失败: ${error.message}`);
+    }
+  } finally {
+    claimFaucetRunning = false;
+  }
+}
+
+// 获取代理 IP
+async function getProxyIP(proxy) {
+  let agent;
+  if (proxy) {
+    agent = new SocksProxyAgent(proxy);
+  }
+  const config = {};
+  if (agent) {
+    config.httpAgent = agent;
+    config.httpsAgent = agent;
+  }
+  try {
+    const response = await axios.get("https://api.ipify.org?format=json", config);
+    if (response.status === 200) {
+      return response.data;
+    } else {
+      throw new Error(`非 200 响应码: ${response.status}`);
+    }
+  } catch (error) {
+    if (error.response) {
+      throw new Error(`API 错误，状态码 ${error.response.status}，数据 ${JSON.stringify(error.response.data)}`);
+    } else {
+      throw error;
+    }
+  }
+}
+
+// 领取 PING 水龙头
 async function claimFaucetPing() {
   if (claimFaucetRunning) {
     addLog("PING 水龙头请求已在进行中。");
@@ -135,6 +228,7 @@ async function claimFaucetPing() {
   }
 }
 
+// 领取 PONG 水龙头
 async function claimFaucetPong() {
   if (claimFaucetRunning) {
     addLog("PONG 水龙头请求已在进行中。");
@@ -215,15 +309,30 @@ async function autoSwapPingPong(totalSwaps) {
   try {
     if (!globalWallet) throw new Error("钱包尚未初始化。");
     const swapContract = new ethers.Contract(SWAP_CONTRACT_ADDRESS, swapContractABI, globalWallet);
+    const pingContract = new ethers.Contract(PING_TOKEN_ADDRESS, PING_ABI, globalWallet);
+    const pongContract = new ethers.Contract(PONG_TOKEN_ADDRESS, PONG_ABI, globalWallet);
     addLog(`开始自动交换 ${totalSwaps} 次。`);
     for (let i = 0; i < totalSwaps; i++) {
       if (autoSwapCancelled) {
         addLog("自动交换已取消。");
         break;
       }
-      const swapDirection = Math.random() < 0.5 ? "PongToPing" : "PingToPong";
-      let tokenIn = swapDirection === "PongToPing" ? PONG_TOKEN_ADDRESS : PING_TOKEN_ADDRESS;
-      let tokenOut = swapDirection === "PongToPing" ? PING_TOKEN_ADDRESS : PONG_TOKEN_ADDRESS;
+      const pingBalance = await pingContract.balanceOf(globalWallet.address);
+      const pongBalance = await pongContract.balanceOf(globalWallet.address);
+      const minAmount = ethers.parseUnits("100", 18);
+      let tokenIn, tokenOut, direction;
+      if (pingBalance >= minAmount && pongBalance >= minAmount) {
+        direction = Math.random() < 0.5 ? "PongToPing" : "PingToPong";
+      } else if (pingBalance < minAmount && pongBalance >= minAmount) {
+        direction = "PongToPing";
+      } else if (pongBalance < minAmount && pingBalance >= minAmount) {
+        direction = "PingToPong";
+      } else {
+        addLog("Ping 和 Pong 余额均不足，无法继续交换。");
+        break;
+      }
+      tokenIn = direction === "PongToPing" ? PONG_TOKEN_ADDRESS : PING_TOKEN_ADDRESS;
+      tokenOut = direction === "PongToPing" ? PING_TOKEN_ADDRESS : PONG_TOKEN_ADDRESS;
       const randomAmount = randomInRange(100, 500);
       const amountIn = ethers.parseUnits(randomAmount.toString(), 18);
       const tokenInName = getTokenName(tokenIn);
@@ -415,28 +524,32 @@ async function showSomniaSubMenu() {
 // 水龙头菜单
 async function showFaucetSubMenu() {
   console.log(chalk.bold.green("\n=== 水龙头领取菜单 ==="));
-  console.log(chalk.yellow((autoSwapRunning || claimFaucetRunning) ? "  1. 领取 PING 水龙头 (已禁用)" : "  1. 领取 PING 水龙头"));
-  console.log(chalk.yellow((autoSwapRunning || claimFaucetRunning) ? "  2. 领取 PONG 水龙头 (已禁用)" : "  2. 领取 PONG 水龙头"));
-  if (autoSwapRunning || claimFaucetRunning) console.log(chalk.yellow("  3. 停止交易"));
-  console.log(chalk.yellow(`  ${(autoSwapRunning || claimFaucetRunning) ? "4" : "3"}. 返回主菜单`));
-  console.log(chalk.red(`  ${(autoSwapRunning || claimFaucetRunning) ? "5" : "4"}. 退出`));
-  rl.question(chalk.white(`请选择操作 (1-${(autoSwapRunning || claimFaucetRunning) ? "5" : "4"}): `), async (choice) => {
-    if ((autoSwapRunning || claimFaucetRunning) && (choice === "1" || choice === "2")) {
+  console.log(chalk.yellow((autoSwapRunning || claimFaucetRunning) ? "  1. 领取 STT 水龙头 (已禁用)" : "  1. 领取 STT 水龙头"));
+  console.log(chalk.yellow((autoSwapRunning || claimFaucetRunning) ? "  2. 领取 PING 水龙头 (已禁用)" : "  2. 领取 PING 水龙头"));
+  console.log(chalk.yellow((autoSwapRunning || claimFaucetRunning) ? "  3. 领取 PONG 水龙头 (已禁用)" : "  3. 领取 PONG 水龙头"));
+  if (autoSwapRunning || claimFaucetRunning) console.log(chalk.yellow("  4. 停止交易"));
+  console.log(chalk.yellow(`  ${(autoSwapRunning || claimFaucetRunning) ? "5" : "4"}. 返回主菜单`));
+  console.log(chalk.red(`  ${(autoSwapRunning || claimFaucetRunning) ? "6" : "5"}. 退出`));
+  rl.question(chalk.white(`请选择操作 (1-${(autoSwapRunning || claimFaucetRunning) ? "6" : "5"}): `), async (choice) => {
+    if ((autoSwapRunning || claimFaucetRunning) && (choice === "1" || choice === "2" || choice === "3")) {
       addLog("交易进行中，请先停止交易再领取水龙头。");
       await showFaucetSubMenu();
     } else if (choice === "1") {
-      await claimFaucetPing();
+      await claimFaucetSTT(1, 1); // 单实例运行
       await showFaucetSubMenu();
     } else if (choice === "2") {
+      await claimFaucetPing();
+      await showFaucetSubMenu();
+    } else if (choice === "3") {
       await claimFaucetPong();
       await showFaucetSubMenu();
-    } else if (choice === "3" && (autoSwapRunning || claimFaucetRunning)) {
+    } else if (choice === "4" && (autoSwapRunning || claimFaucetRunning)) {
       claimFaucetCancelled = true;
       addLog("已接收停止交易命令 (水龙头)。");
       await showFaucetSubMenu();
-    } else if ((!autoSwapRunning && !claimFaucetRunning && choice === "3") || (choice === "4" && (autoSwapRunning || claimFaucetRunning))) {
-      await showMainMenu();
     } else if ((!autoSwapRunning && !claimFaucetRunning && choice === "4") || (choice === "5" && (autoSwapRunning || claimFaucetRunning))) {
+      await showMainMenu();
+    } else if ((!autoSwapRunning && !claimFaucetRunning && choice === "5") || (choice === "6" && (autoSwapRunning || claimFaucetRunning))) {
       console.log(chalk.red("退出程序"));
       process.exit(0);
     } else {
@@ -528,10 +641,12 @@ async function showSendTokenSubMenu() {
 // 启动
 async function start() {
   console.log(chalk.bold.green("=================== SOMNIA AUTO SWAP ==================="));
-  console.log(chalk.yellow("关注X：https://x.com/qklxsqf 获得更多资讯"));
+  console.log(chalk.yellow("欢迎使用 Somnia 测试网自动化工具"));
   console.log(chalk.green("======================================================="));
   await updateWalletData();
   await showMainMenu();
 }
+
+start();
 
 start();
